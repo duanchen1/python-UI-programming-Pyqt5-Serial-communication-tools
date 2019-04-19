@@ -7,11 +7,57 @@ Module implementing MainWindow.
 from PyQt5.QtCore import pyqtSlot
 from PyQt5.QtWidgets import QMainWindow
 from PyQt5.QtWidgets import QMessageBox
-from PyQt5.QtCore import QTimer
+from PyQt5.QtCore import QTimer,QThread,pyqtSignal
 from Ui_serialwindow import *
 from time import sleep
 import serial
 import serial.tools.list_ports
+
+
+class WorkThread(QThread):
+    trigger = pyqtSignal(str,int)
+
+    def __init__(self,a):
+        super(WorkThread, self).__init__()
+        self.a = a
+
+    def run(self):
+        data = None
+        print(self.a)
+        while (True):
+            try:
+                num = self.a.myserial.inWaiting()
+            except:
+                self.a.timer_send.stop()
+                # 串口拔出错误，关闭定时器
+                self.a.myserial.close()
+                self.a.myserial = serial.Serial()
+                self.a.thread.wait()
+
+                # 设置为打开按钮状态
+                self.a.openserial.setChecked(False)
+                self.a.openserial.setText("打开串口")
+                return None
+            if (num > 0):
+                # 有时间会出现少读到一个字符的情况，所以循环读直到没有异常，一般中文字符会出错，英文字符没问题
+                bufferdata = self.a.myserial.read(num)
+                while (True):
+                    try:
+                        data = bufferdata.decode('UTF-8')
+                        break
+                    except:
+                        sleep(0.05)
+                        num = self.a.myserial.inWaiting()
+                        bufferdata = bufferdata + self.a.myserial.read(num)
+                        print(bufferdata)
+                        num = len(bufferdata)
+            else:
+                # 此时回车后面没有收到换行，就把回车发出去
+                pass
+
+            self.trigger.emit(data,num)
+            sleep(0.002)
+
 
 
 class MainWindow(QMainWindow, Ui_MainWindow):
@@ -69,11 +115,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.openserial.setCheckable(True)
 
         # 实例化一个定时器
-        self.timer = QTimer(self)
+
 
         self.timer_send = QTimer(self)
-        # 定时器调用读取串口接收数据
-        self.timer.timeout.connect(self.recv)
+
 
         # 定时发送
         self.timer_send.timeout.connect(self.on_send_clicked)
@@ -144,17 +189,17 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         """
         Slot documentation goes here.
         """
-        self.myserial.port = self.serialnum.currentText()
-        self.myserial.baudrate = int(self.bandrate.currentText())
-        self.myserial.bytesize = int(self.databit.currentText())
-        self.myserial.parity = self.crcbit.currentText()
-        self.myserial.stopbits = float(self.stopbit.currentText())
         if not self.myserial.isOpen():
+            self.myserial.port = self.serialnum.currentText()
+            self.myserial.baudrate = int(self.bandrate.currentText())
+            self.myserial.bytesize = int(self.databit.currentText())
+            self.myserial.parity = self.crcbit.currentText()
+            self.myserial.stopbits = float(self.stopbit.currentText())
+            print(self.myserial)
             try:
                 # 输入参数'COM13',115200
                 #self.myserial = serial.Serial(self.serialnum.currentText(), int(self.bandrate.currentText()),timeout=0.2)
                 self.myserial.open()
-                print(self.myserial)
             except:
                 QMessageBox.critical(self, 'pycom', '没有可用的串口或当前串口被占用')
                 self.openserial.setChecked(False)
@@ -162,18 +207,21 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             # 字符间隔超时时间设置
             if self.myserial.isOpen():
                 self.myserial.interCharTimeout = 0.001
+                # 多线程读取串口接收数据
+                self.thread = WorkThread(self)
+                self.thread.trigger.connect(self.recv)
+                self.thread.start()
                 # 1ms的测试周期
-                self.timer.start(2)
                 self.openserial.setText("关闭串口")
 
         else:
             # 关闭定时器，停止读取接收数据
             self.timer_send.stop()
-            self.timer.stop()
 
             try:
                 # 关闭串口
                 self.myserial.close()
+                self.thread.wait()
             except:
                 QMessageBox.critical(self, 'pycom', '关闭串口失败')
                 return None
@@ -255,6 +303,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
                     # 串口拔出错误，关闭定时器
                     self.myserial.close()
+                    self.thread.wait()
                     self.myserial = serial.Serial()
 
                     # 设置为打开按钮状态
@@ -308,50 +357,15 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 plist_0 = list(plist[i])
                 self.serialnum.addItem(str(plist_0[0]))
 
-    def recv(self):
-        try:
-            num = self.myserial.inWaiting()
-        except:
-            self.timer_send.stop()
-            self.timer.stop()
-            # 串口拔出错误，关闭定时器
-            self.myserial.close()
-            self.myserial = serial.Serial()
+    def recv(self,bufferdata,num):
+         # 把字符串显示到窗口中去
+         if (num>0):
+             self.recedisplay.insertPlainText(bufferdata)
+             # 统计接收字符的数量
+             self.receive_num = self.receive_num + num
+             bardis = '发送：' + '{:d}'.format(self.send_num) + '  接收:' + '{:d}'.format(self.receive_num)
+             self.bar.setText(bardis)
 
-            # 设置为打开按钮状态
-            self.openserial.setChecked(False)
-            self.openserial.setText("打开串口")
-            return None
-        if (num > 0):
-            # 有时间会出现少读到一个字符的情况，所以循环读直到没有异常，一般中文字符会出错，英文字符没问题
-            bufferdata = self.myserial.read(num)
-            while(True):
-                try:
-                    data = bufferdata.decode('UTF-8')
-                    break
-                except:
-                    sleep(0.05)
-                    num = self.myserial.inWaiting()
-                    bufferdata = bufferdata+self.myserial.read(num)
-                    print(bufferdata)
-
-            # 调试打印输出数据
-            # print(data)
-            num = len(bufferdata)
-            # 十六进制显示
-
-            # 把字符串显示到窗口中去
-            self.recedisplay.insertPlainText(data)
-
-
-            # 统计接收字符的数量
-            self.receive_num = self.receive_num + num
-            bardis = '发送：' + '{:d}'.format(self.send_num) + '  接收:' + '{:d}'.format(self.receive_num)
-            self.bar.setText(bardis)
-
-        else:
-            # 此时回车后面没有收到换行，就把回车发出去
-            pass
 
 
 if __name__ == "__main__":
